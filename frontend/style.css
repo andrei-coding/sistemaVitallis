@@ -325,3 +325,10 @@ dialog[open]{animation:sobe .22s ease-out}
 /* ============ Utilitários (antes eram style="..." no HTML) ============ */
 .sprite{position:absolute}
 .secao-head.sem-margem{margin-top:0}
+
+/* ============ Perfis e usuários ============ */
+.consultas-grid.so-agenda{grid-template-columns:minmax(0,1fr)}
+.dica{color:var(--ink-2); font-size:13px; font-weight:400}
+.check{display:flex; align-items:center; gap:10px; font-size:14.5px; cursor:pointer}
+.check input{width:18px; height:18px; accent-color:var(--brand)}
+.chip.inativo{background:var(--danger-bg); color:var(--danger)}
