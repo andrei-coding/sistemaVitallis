@@ -19,6 +19,10 @@ public class PacienteController {
         return pacienteService.listarTodos();
     }
 
+    public List<Paciente> listarDoMedico(String medico) {
+        return pacienteService.listarDoMedico(medico);
+    }
+
     public Paciente buscarPorId(int id) {
         return pacienteService.buscarPorId(id);
     }
