@@ -24,9 +24,11 @@ import model.Consulta;
 import model.Paciente;
 import model.Usuario;
 import repository.PacienteRepository;
+import repository.UsuarioRepository;
 import service.AgendaService;
 import service.AutenticacaoService;
 import service.PacienteService;
+import service.UsuarioService;
 import util.Database;
 
 /**
@@ -41,7 +43,9 @@ public class ApiServer {
     private static final String COOKIE_SESSAO = "CLINICA_SESSAO";
     private static final int TAMANHO_MAX_CORPO = 400_000;   // bytes (cabe a foto de até 200 mil caracteres)
 
-    private static final AutenticacaoService authService = new AutenticacaoService();
+    private static final UsuarioRepository usuarioRepository = new UsuarioRepository();
+    private static final AutenticacaoService authService = new AutenticacaoService(usuarioRepository);
+    private static final UsuarioService usuarioService = new UsuarioService(usuarioRepository, authService);
     private static final PacienteService pacienteService = new PacienteService(new PacienteRepository());
     private static final AgendaService agendaService = new AgendaService();
     private static final PacienteController pacienteController = new PacienteController(pacienteService);
@@ -56,6 +60,7 @@ public class ApiServer {
 
     public static void main(String[] args) throws Exception {
         Database.inicializar();
+        authService.garantirAdministradorInicial();
         // Por padrão só aceita conexões desta máquina; defina CLINICA_HOST=0.0.0.0 para abrir na rede local.
         String host = System.getenv("CLINICA_HOST");
         if (host == null || host.isBlank()) host = "127.0.0.1";
@@ -65,6 +70,7 @@ public class ApiServer {
         server.createContext("/api/logout", seguro(ApiServer::logout));
         server.createContext("/api/patients", seguro(ApiServer::patients));
         server.createContext("/api/appointments", seguro(ApiServer::appointments));
+        server.createContext("/api/users", seguro(ApiServer::users));
         server.createContext("/", seguro(ApiServer::staticFiles));
 
         server.setExecutor(Executors.newCachedThreadPool());
@@ -115,7 +121,8 @@ public class ApiServer {
 
         sendJson(ex, 200, "{"
                 + "\"login\":\"" + esc(usuario.getLogin()) + "\","
-                + "\"papel\":\"" + esc(usuario.getPapel()) + "\""
+                + "\"papel\":\"" + esc(usuario.getPapel()) + "\","
+                + "\"medico\":" + (usuario.getMedico() == null ? "null" : "\"" + esc(usuario.getMedico()) + "\"")
                 + "}");
     }
 
@@ -132,20 +139,30 @@ public class ApiServer {
     }
 
     private static void patients(HttpExchange ex) throws IOException {
-        if (!autenticado(ex)) return;
+        Usuario usuario = usuarioLogado(ex);
+        if (usuario == null) return;
 
         String method = ex.getRequestMethod();
         String path = ex.getRequestURI().getPath();
 
         if ("GET".equalsIgnoreCase(method) && path.equals("/api/patients")) {
             StringBuilder json = new StringBuilder("[");
-            List<Paciente> pacientes = pacienteController.listar();
+            // administrador vê todos; médico vê só os pacientes que atende
+            List<Paciente> pacientes = usuario.isAdmin()
+                    ? pacienteController.listar()
+                    : pacienteController.listarDoMedico(usuario.getMedico());
             for (int i = 0; i < pacientes.size(); i++) {
                 if (i > 0) json.append(",");
                 json.append(patientJson(pacientes.get(i), true));
             }
             json.append("]");
             sendJson(ex, 200, json.toString());
+            return;
+        }
+
+        // cadastrar, editar e excluir pacientes: somente administrador (médico apenas consulta)
+        if (!usuario.isAdmin()) {
+            sendError(ex, 403, "Você não tem permissão para esta ação.");
             return;
         }
 
@@ -186,20 +203,30 @@ public class ApiServer {
     }
 
     private static void appointments(HttpExchange ex) throws IOException {
-        if (!autenticado(ex)) return;
+        Usuario usuario = usuarioLogado(ex);
+        if (usuario == null) return;
 
         String method = ex.getRequestMethod();
         String path = ex.getRequestURI().getPath();
 
         if ("GET".equalsIgnoreCase(method) && path.equals("/api/appointments")) {
             StringBuilder json = new StringBuilder("[");
-            List<Consulta> consultas = agendaService.listarTodas();
+            // administrador vê toda a agenda; médico vê só as próprias consultas, sem o orçamento
+            List<Consulta> consultas = usuario.isAdmin()
+                    ? agendaService.listarTodas()
+                    : agendaService.listarPorMedico(usuario.getMedico());
             for (int i = 0; i < consultas.size(); i++) {
                 if (i > 0) json.append(",");
-                json.append(appointmentJson(consultas.get(i)));
+                json.append(appointmentJson(consultas.get(i), usuario.isAdmin()));
             }
             json.append("]");
             sendJson(ex, 200, json.toString());
+            return;
+        }
+
+        // agendar, reagendar e orçamentos: somente administrador
+        if (!usuario.isAdmin()) {
+            sendError(ex, 403, "Você não tem permissão para esta ação.");
             return;
         }
 
@@ -218,7 +245,7 @@ public class ApiServer {
             Consulta consulta = agendaService.agendar(
                     paciente, campo(corpo, "medico"), dataHora,
                     parseOrcamentoCentavos(corpo.get("orcamentoCentavos")));
-            sendJson(ex, 201, appointmentJson(consulta));
+            sendJson(ex, 201, appointmentJson(consulta, true));
             return;
         }
 
@@ -234,7 +261,7 @@ public class ApiServer {
                 sendError(ex, 404, "Consulta não encontrada.");
                 return;
             }
-            sendJson(ex, 200, appointmentJson(consulta));
+            sendJson(ex, 200, appointmentJson(consulta, true));
             return;
         }
 
@@ -248,7 +275,70 @@ public class ApiServer {
                 sendError(ex, 404, "Consulta não encontrada.");
                 return;
             }
-            sendJson(ex, 200, appointmentJson(consulta));
+            sendJson(ex, 200, appointmentJson(consulta, true));
+            return;
+        }
+
+        sendError(ex, 405, "Método não permitido.");
+    }
+
+    private static void users(HttpExchange ex) throws IOException {
+        Usuario usuario = usuarioLogado(ex);
+        if (usuario == null) return;
+        if (!usuario.isAdmin()) {
+            sendError(ex, 403, "Somente o administrador gerencia usuários.");
+            return;
+        }
+
+        String method = ex.getRequestMethod();
+        String path = ex.getRequestURI().getPath();
+
+        if ("GET".equalsIgnoreCase(method) && path.equals("/api/users")) {
+            StringBuilder json = new StringBuilder("[");
+            List<Usuario> usuarios = usuarioService.listar();
+            for (int i = 0; i < usuarios.size(); i++) {
+                if (i > 0) json.append(",");
+                json.append(userJson(usuarios.get(i)));
+            }
+            json.append("]");
+            sendJson(ex, 200, json.toString());
+            return;
+        }
+
+        if ("POST".equalsIgnoreCase(method) && path.equals("/api/users")) {
+            Map<String, String> corpo = lerJson(ex);
+            Usuario criado = usuarioService.criar(
+                    campo(corpo, "login"), campo(corpo, "senha"), campo(corpo, "papel"), campo(corpo, "medico"));
+            sendJson(ex, 201, userJson(criado));
+            return;
+        }
+
+        if ("PUT".equalsIgnoreCase(method) && path.matches("/api/users/\\d{1,9}")) {
+            int id = idDoCaminho(path);
+            Map<String, String> corpo = lerJson(ex);
+            Boolean ativo = null;
+            if (corpo.containsKey("ativo")) {
+                String texto = corpo.get("ativo");
+                if ("true".equals(texto)) ativo = Boolean.TRUE;
+                else if ("false".equals(texto)) ativo = Boolean.FALSE;
+                else throw new IllegalArgumentException("Status inválido.");
+            }
+            Usuario atualizado = usuarioService.atualizar(
+                    id, usuario.getId(), corpo.get("medico"), corpo.get("senha"), ativo);
+            if (atualizado == null) {
+                sendError(ex, 404, "Usuário não encontrado.");
+                return;
+            }
+            sendJson(ex, 200, userJson(atualizado));
+            return;
+        }
+
+        if ("DELETE".equalsIgnoreCase(method) && path.matches("/api/users/\\d{1,9}")) {
+            if (!usuarioService.remover(idDoCaminho(path), usuario.getId())) {
+                sendError(ex, 404, "Usuário não encontrado.");
+                return;
+            }
+            sendJson(ex, 200, "{\"ok\":true}");
             return;
         }
 
@@ -283,11 +373,12 @@ public class ApiServer {
 
     // ------------------------------------------------------------ autenticação
 
-    /** Exige sessão válida (cookie). Se não houver, responde 401 e retorna false. */
-    private static boolean autenticado(HttpExchange ex) throws IOException {
-        if (authService.validarSessao(tokenDaSessao(ex)) != null) return true;
+    /** Exige sessão válida (cookie). Devolve o usuário logado; se não houver, responde 401 e devolve null. */
+    private static Usuario usuarioLogado(HttpExchange ex) throws IOException {
+        Usuario usuario = authService.validarSessao(tokenDaSessao(ex));
+        if (usuario != null) return usuario;
         sendError(ex, 401, "Sessão inexistente ou expirada. Faça login novamente.");
-        return false;
+        return null;
     }
 
     private static String tokenDaSessao(HttpExchange ex) {
@@ -477,14 +568,28 @@ public class ApiServer {
         return json + "}";
     }
 
-    private static String appointmentJson(Consulta c) {
+    /** O orçamento só é enviado a quem pode vê-lo (administrador); o médico nunca o recebe. */
+    private static String appointmentJson(Consulta c, boolean incluirOrcamento) {
         return "{"
                 + "\"id\":" + c.getId() + ","
                 + "\"paciente\":" + patientJson(c.getPaciente(), false) + ","
                 + "\"medico\":\"" + esc(c.getMedico()) + "\","
                 + "\"dataHora\":\"" + c.getDataHora().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME) + "\","
-                + "\"orcamentoCentavos\":" + (c.getOrcamentoCentavos() == null ? "null" : c.getOrcamentoCentavos()) + ","
+                + (incluirOrcamento
+                        ? "\"orcamentoCentavos\":" + (c.getOrcamentoCentavos() == null ? "null" : c.getOrcamentoCentavos()) + ","
+                        : "")
                 + "\"status\":\"" + esc(c.getStatus()) + "\""
+                + "}";
+    }
+
+    /** Nunca inclui o hash da senha. */
+    private static String userJson(Usuario u) {
+        return "{"
+                + "\"id\":" + u.getId() + ","
+                + "\"login\":\"" + esc(u.getLogin()) + "\","
+                + "\"papel\":\"" + esc(u.getPapel()) + "\","
+                + "\"medico\":" + (u.getMedico() == null ? "null" : "\"" + esc(u.getMedico()) + "\"") + ","
+                + "\"ativo\":" + u.isAtivo()
                 + "}";
     }
 
