@@ -47,6 +47,23 @@ public class PacienteRepository {
         }
     }
 
+    /** Pacientes que têm ao menos uma consulta agendada com o médico informado (sem diferenciar maiúsculas). */
+    public List<Paciente> listarPorMedico(String medico) {
+        String sql = "SELECT id, nome, cpf, convenio, foto, historico FROM pacientes WHERE id IN ("
+                + "SELECT paciente_id FROM consultas WHERE status = 'AGENDADA' AND LOWER(medico) = LOWER(?)) ORDER BY id";
+        List<Paciente> pacientes = new ArrayList<>();
+        try (Connection conexao = Database.conectar();
+             PreparedStatement statement = conexao.prepareStatement(sql)) {
+            statement.setString(1, medico);
+            try (ResultSet resultado = statement.executeQuery()) {
+                while (resultado.next()) pacientes.add(mapear(resultado));
+                return pacientes;
+            }
+        } catch (SQLException e) {
+            throw erroBanco("Não foi possível listar os pacientes do médico.", e);
+        }
+    }
+
     public Optional<Paciente> buscarPorId(int id) {
         String sql = "SELECT id, nome, cpf, convenio, foto, historico FROM pacientes WHERE id = ?";
         try (Connection conexao = Database.conectar();
