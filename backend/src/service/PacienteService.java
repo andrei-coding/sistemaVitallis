@@ -61,6 +61,10 @@ public class PacienteService {
         return repository.listarTodos();
     }
 
+    public synchronized List<Paciente> listarDoMedico(String medico) {
+        return repository.listarPorMedico(medico);
+    }
+
     public synchronized Paciente buscarPorId(int id) {
         return repository.buscarPorId(id).orElse(null);
     }
